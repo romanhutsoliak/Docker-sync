@@ -1,125 +1,151 @@
 #!/usr/bin/node
 
-// https://www.npmjs.com/package/watcher
-import Watcher from 'watcher';
-import fs from 'fs'; 
+import fs from 'fs';
+import Watcher from 'watcher'; // https://www.npmjs.com/package/watcher
+import {
+    calculateIfWatcherMustBeReloaded,
+    convertToLinuxNetworkPath,
+    convertToWindowsNetworkPath,
+    excludeFoldersFromLinuxProjectsToWatch,
+    excludeWindowsWatcherPaths,
+    execEventCommand,
+    fileHash,
+    findWindowsProjectsToWatch,
+    getFilesListInDirectoryRecursively,
+    getLinuxProjectsDirectoriesToWatch,
+    getLinuxVolumesDirPath,
+    incrementWatcherOperationsPerSecond,
+    isWatcherMustBeReloaded,
+    playSystemBeep,
+    resetWatcherOperationsPerSecond,
+    windowsCurrentDirectoryPath
+} from "./HostNodeWatcher.helper.js";
 
+console.log('Node watcher init:');
 
-const hostCurrentDirrectoryRootPath = process.cwd().replaceAll('\\', '\\\\');
-const containerSoursePath = '/source';
-const containerDestinationPath = '/app';
-const hostWatcherLogDirPathTemplate = './docker/watcher/{{project}}';
-const hostWatcherLogPathTemplate = hostWatcherLogDirPathTemplate + '/watcher.log';
+// windows -> linus watch
+const windowsProjectsToWatch = findWindowsProjectsToWatch();
+const watcherDescriptors = [];
 
+// watch for projects changes
+windowsProjectsToWatch.forEach((project) => {
+    // if no docker volume skip sync
+    if (!fs.existsSync(getLinuxVolumesDirPath(project))) {
+        console.log('Docker volume not found: ' + getLinuxVolumesDirPath(project));
+        return;
+    }
 
-console.log('Node watcher init');
-let hostProjectsToWatch = [
-	// 'project-folder',
-];
-findHostProjectsToWatch(hostCurrentDirrectoryRootPath);
-console.log(hostProjectsToWatch);
+    // windows to linux
+    createWatcher(project);
 
+    console.log('- Windows watcher init for ' + project);
 
-// watch for projects changess
-hostProjectsToWatch.forEach(function(project) {
-	if (!fs.existsSync(hostWatcherLogDirPath(project))) {
-		fs.mkdirSync(hostWatcherLogDirPath(project));
-	}
-	new Watcher( hostCurrentDirrectoryPath(project), {
-			ignoreInitial: false,
-			recursive: true,
-			renameDetection: true,
-			ignore: (path) => {
-				if (path.includes('\\.git\\')) {
-					return true;
-				}
-				if (path.includes('\\vendor\\')) {
-					return true;
-				}
-				if (path.includes('\\node_modules\\')) {
-					return true;
-				}
-				if (path.includes('\\.idea\\')) {
-					return true;
-				}
-				return false;
+    // linux to windows
+    const linuxProjectsDirectoriesToWatch = getLinuxProjectsDirectoriesToWatch(project);
+    if (linuxProjectsDirectoriesToWatch.length) {
+        let linuxProjectsSourcePathHashes = [];
+
+        function copyLinuxToWindowsFn(sourcePath) {
+            // cache file sourcePath hash for performance and reduce disc read
+            if (
+                !linuxProjectsSourcePathHashes[sourcePath] ||
+                (fs.existsSync(sourcePath) && fileHash(sourcePath) !== linuxProjectsSourcePathHashes[sourcePath])
+            ) {
+                const targetPath = convertToWindowsNetworkPath(sourcePath, project);
+                execEventCommand('change', sourcePath, targetPath, null, project, '<-');
+
+                linuxProjectsSourcePathHashes[sourcePath] = fileHash(sourcePath);
+            }
+        }
+
+        setInterval(() => {
+			try {
+				linuxProjectsDirectoriesToWatch.forEach((relativePath) => {
+					const fullPath = getLinuxVolumesDirPath(project) + '\\' + relativePath;
+					if (fs.lstatSync(fullPath).isDirectory()) {
+						getFilesListInDirectoryRecursively(fullPath, function (err, filesList) {
+							if (err) {
+								throw err;
+							}
+							filesList.map((sourcePath) => copyLinuxToWindowsFn(sourcePath));
+						});
+					} else {
+						copyLinuxToWindowsFn(fullPath);
+					}
+				});
+			} catch (exception) {
+				playSystemBeep();
+
+				console.log('--- exception linux ---');
+				console.log(exception);
 			}
-		}, ( eventName, targetPath, renamedToPath ) => {
-			console.log ( Date.now() + ': ' + eventName ); // => could be any target event: 'add', 'addDir', 'change', 'rename', 'renameDir', 'unlink' or 'unlinkDir'
-			// => the file system path where the event took place, this is always provided
-			console.log ( convertToUnixRelativePath(targetPath, project) ); 
-			// => the file system path "targetPath" got renamed to, this is only provided on 'rename'/'renameDir' events
-			console.log ( convertToUnixRelativePath(renamedToPath || null, project) ); 
-			
-			let unixExecCommand = createUnixExecCommand(eventName, targetPath, renamedToPath, project);
-			if (unixExecCommand) {
-				fs.appendFileSync(hostWatcherLogPath(project), unixExecCommand + "\n");
-			}
-		}); 
+        }, 5000);
+
+        console.log('- Linux watcher init for ' + project);
+        console.log(linuxProjectsDirectoriesToWatch);
+    }
+	
+    console.log('');
 });
 
+setInterval(() => {
+    windowsProjectsToWatch.forEach((project) => {
+        calculateIfWatcherMustBeReloaded(project);
 
-// Helper functions
-// ---------------------------------------------------------------------------------------------------
-function convertToUnixRelativePath(path, project) {
-	const regexpCurrDir = new RegExp(hostCurrentDirrectoryPath(project), 'gi');
-	return path?.replace(regexpCurrDir, '').replaceAll('\\', '/');
-}
+        if (isWatcherMustBeReloaded(project)) {
+            resetWatcherOperationsPerSecond(project);
 
-function hostCurrentDirrectoryPath(project) {
-	return hostCurrentDirrectoryRootPath + '\\\\' + project;
-}
+            // restart file watcher
+            createWatcher(project);
+        }
+    });
+}, 1000);
 
-function hostWatcherLogDirPath(project) {
-	return hostWatcherLogDirPathTemplate.replace('{{project}}', project);
-}
+function createWatcher(project) {
+    if (watcherDescriptors[project] !== undefined && !watcherDescriptors[project].isReady()) {
+        console.log('');
+        console.log('--- Watcher is not ready: ' + project);
 
-function hostWatcherLogPath(project) {
-	return hostWatcherLogPathTemplate.replace('{{project}}', project);
-}
+        return;
+    }
 
-function findHostProjectsToWatch(dirPathLevel1) {
-	// if projects were added manually
-	if (hostProjectsToWatch.length) {
-		return;
-	}
-	
-	let filesLevel2, dirPathLevel2, filesLevel3, dirPathLevel3, filesLevel4, dirPathLevel4;
-	
-	const filesLevel1 = fs.readdirSync(dirPathLevel1, { withFileTypes: true });
-	
-	filesLevel1.forEach(function (filesObgectLevel2) {
-		dirPathLevel2 = filesObgectLevel2.path + '\\\\' + filesObgectLevel2.name;
-		if (filesObgectLevel2.isDirectory()) {
-			filesLevel3 = fs.readdirSync(dirPathLevel2, { withFileTypes: true });
-			filesLevel3.forEach(function (filesObgectLevel3) {
-				if (filesObgectLevel3.name == '.git') {
-					hostProjectsToWatch.push(filesObgectLevel2.name);
-					return false;
-				}
-			});
-		}
-	});
-};
+    if (watcherDescriptors[project] !== undefined && !watcherDescriptors[project].isClosed()) {
+        console.log('');
+        console.log('\x1b[32m%s\x1b[0m', '--- Restarted watcher for: ' + project);
 
-function createUnixExecCommand(eventName, targetPath, renamedToPath, project) {
-	targetPath = convertToUnixRelativePath(targetPath, project);
-	if (['change', 'add'].includes(eventName)) {
-		return 'cp|' + containerSoursePath + targetPath + '|' + containerDestinationPath + targetPath;
-	}
-	if (eventName == 'unlink') {
-		return 'rm||' + containerDestinationPath + targetPath;
-	}
-	if (eventName == 'rename' || eventName == 'renameDir') {
-		renamedToPath = convertToUnixRelativePath(renamedToPath || null, project);
-		return 'mv|' + containerSoursePath + targetPath + '|' + containerDestinationPath + renamedToPath;
-	}
-	if (eventName == 'addDir') {
-		return 'mkdir||' + containerDestinationPath + targetPath;
-	}
-	if (eventName == 'unlinkDir') {
-		return 'rmdir||' + containerDestinationPath + targetPath;
-	}
-	
-	return null;
+        watcherDescriptors[project].close();
+    }
+
+    watcherDescriptors[project] = new Watcher(windowsCurrentDirectoryPath(project), {
+        ignoreInitial: false,
+        recursive: true,
+        renameDetection: true,
+        ignore: (path) => {
+            if (excludeWindowsWatcherPaths(path, project)) {
+                return true;
+            }
+
+            return false;
+        }
+    }, (eventName, sourcePath, renamedToPath) => {
+        // don't interrupt on error
+        try {
+            if (excludeFoldersFromLinuxProjectsToWatch(sourcePath, project) && ['change', 'add', 'rename'].includes(eventName)) {
+                return;
+            }
+
+            const targetPath = convertToLinuxNetworkPath(sourcePath, project);
+            const renamedToTargetPath = renamedToPath ? convertToLinuxNetworkPath(renamedToPath, project) : null;
+            const operationWasPerformed = execEventCommand(eventName, sourcePath, targetPath, renamedToTargetPath, project);
+
+            if (operationWasPerformed) {
+                incrementWatcherOperationsPerSecond(project);
+            }
+        } catch (exception) {
+            playSystemBeep();
+
+            console.log('--- exception windows ---');
+            console.log(exception);
+        }
+    }).watchPollingOnce();
 }
