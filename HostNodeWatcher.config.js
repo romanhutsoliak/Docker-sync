@@ -28,9 +28,8 @@ export default {
     linuxVolumesDirPathTemplate: 'w:\\data\\docker\\volumes\\' + dockerComposeYml.name + '_{{project}}\\_data',
 
     windowsProjectsToWatch: [
-        'spd-mothership',
-        // 'spd-orders',
-        // 'spd-locations',
+        'project1',
+        // 'project2',
     ],
     ignoreWindowsWatcherPaths: [
         '*\\.git\\',
@@ -47,11 +46,9 @@ export default {
     // linus -> windows watch (every 5 sec setInterval)
     linuxProjectsToWatch: {
         // project names here, empty array no sync
-        'spd-locations': [
+        'project1': [
             '*', // includes/adds values from default
-            'public\\shipping.log',
-            'public\\delivery.log',
-            'public\\pickup.log',
+            'public\\log1.log',
         ],
         // default if there is no specific rule
         '*': [
@@ -59,5 +56,4 @@ export default {
             // 'bootstrap\\cache',
         ]
     },
-
 }
